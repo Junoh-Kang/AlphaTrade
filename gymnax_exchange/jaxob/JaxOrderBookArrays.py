@@ -28,11 +28,15 @@ INITID = -9000
 MAX_INT = 2_147_483_647  # max 32 bit int
 
 ############### ADD AND REMOVE ###############
+def _add_order_slot(orderside):
+    return jnp.where(orderside == -1, size=1, fill_value=-1)[0][0]
+
+
 @jax.jit
 def add_order(orderside: chex.Array, msg: dict) -> chex.Array :
     """Low level function that will add an order (Dict)
       to the orderbook (Array) and return the updated"""
-    emptyidx=jnp.where(orderside==-1,size=1,fill_value=-1)[0]
+    emptyidx=_add_order_slot(orderside)
     orderside=orderside.at[emptyidx,:].set(jnp.array([msg['price'],jnp.maximum(0,msg['quantity']),msg['orderid'],msg['traderid'],msg['time'],msg['time_ns']])).astype(jnp.int32)
     return __removeZeroNegQuant(orderside)
 
@@ -49,8 +53,7 @@ def __removeZeroNegQuant(orderside):
 #     orderside=orderside.at[idx,1].set(orderside[idx,1]-msg['quantity'])
 #     return __removeZeroNegQuant(orderside)
 
-@jax.jit
-def cancel_order(orderside, msg):
+def _cancel_order_slot(orderside, msg):
     def get_init_id_match(orderside, msg):
         init_id_match = ((orderside[:, 0] == msg['price']) & (orderside[:, 2] <= INITID))
         idx = jnp.where(init_id_match, size=1, fill_value=-1)[0][0]
@@ -61,6 +64,12 @@ def cancel_order(orderside, msg):
     oid_match = (orderside[:, 2] == msg['orderid'])
     idx = jnp.where(oid_match, size=1, fill_value=-1)[0][0]
     idx = jax.lax.cond(idx == -1, get_init_id_match, lambda a, b: idx, orderside, msg)
+    return idx
+
+
+@jax.jit
+def cancel_order(orderside, msg):
+    idx = _cancel_order_slot(orderside, msg)
     orderside = orderside.at[idx, 1].set(orderside[idx, 1] - msg['quantity'])
     return __removeZeroNegQuant(orderside)
 
@@ -175,6 +184,34 @@ def ask_mkt(msg,askside,bidside,trades):
     return askside,matchtuple[0],matchtuple[3]
 
 
+def _ask_limit_mutation_slot(msg, askside, bidside, trades):
+    del trades
+    return jax.lax.cond(
+        msg["type"] == 1,
+        lambda: _add_order_slot(askside),
+        lambda: __get_top_bid_order_idx(bidside)[0],
+    )
+
+
+def _bid_limit_mutation_slot(msg, askside, bidside, trades):
+    del trades
+    return jax.lax.cond(
+        msg["type"] == 1,
+        lambda: _add_order_slot(bidside),
+        lambda: __get_top_ask_order_idx(askside)[0],
+    )
+
+
+def _ask_cancel_mutation_slot(msg, askside, bidside, trades):
+    del bidside, trades
+    return _cancel_order_slot(askside, msg)
+
+
+def _bid_cancel_mutation_slot(msg, askside, bidside, trades):
+    del askside, trades
+    return _cancel_order_slot(bidside, msg)
+
+
 ############### MAIN BRANCHING FUNCS ###############
 
 @jax.jit
@@ -202,8 +239,21 @@ def cond_type_side(ordersides,data):
     # jax.debug.print("msg[type] {}", msg["type"])
     # jax.debug.print("index is {}", index)
     # ask,bid,trade=jax.lax.switch(index-1,(ask_lim,ask_cancel,bid_lim,bid_cancel),msg,askside,bidside,trades)
+    mutation_slot = jax.lax.switch(
+        index,
+        (
+            _ask_limit_mutation_slot,
+            _bid_limit_mutation_slot,
+            _ask_cancel_mutation_slot,
+            _bid_cancel_mutation_slot,
+        ),
+        msg,
+        askside,
+        bidside,
+        trades,
+    )
     ask, bid, trade = jax.lax.switch(index, (ask_lim, bid_lim, ask_cancel, bid_cancel), msg, askside, bidside, trades)
-    return (ask, bid, trade), 0
+    return (ask, bid, trade), mutation_slot
 
 @jax.jit
 def cond_type_side_save_states(ordersides,data):

@@ -49,9 +49,17 @@ class OrderBook(object):
 
     def process_order_array(self, quote:jax.Array, from_data:bool=False, verbose:bool=False):
         '''Same as process_order but quote is an array.'''
-        ordersides = (self.asks.astype(jnp.int32), self.bids.astype(jnp.int32), self.trades.astype(jnp.int32))
-        (self.asks, self.bids, self.trades), _ = job.cond_type_side(ordersides, quote)
+        self._process_order_array(quote)
         return self.trades
+
+    def process_order_array_with_slot(self, quote:jax.Array, from_data:bool=False, verbose:bool=False):
+        '''Apply one order array and return the physical orderbook slot it mutates.'''
+        return self._process_order_array(quote)
+
+    def _process_order_array(self, quote:jax.Array):
+        ordersides = (self.asks.astype(jnp.int32), self.bids.astype(jnp.int32), self.trades.astype(jnp.int32))
+        (self.asks, self.bids, self.trades), mutation_slot = job.cond_type_side(ordersides, quote)
+        return mutation_slot
 
     def process_orders_array(self, msgs):
         '''Wrapper function for the object class that takes a JNP Array of messages (Shape=Nx8), and applies them, in sequence, to the orderbook'''
